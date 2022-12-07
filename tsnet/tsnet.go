@@ -1,4 +1,4 @@
-// Copyright (c) 2021 Tailscale Inc & AUTHORS All rights reserved.
+// Copyright (c) 2022 Tailscale Inc & AUTHORS All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -502,6 +502,94 @@ func (s *Server) APIClient() (*tailscale.Client, error) {
 	c := tailscale.NewClient("-", nil)
 	c.HTTPClient = &http.Client{Transport: s.lb.KeyProvingNoiseRoundTripper()}
 	return c, nil
+}
+
+// ExposeHTTPS returns a HTTPS listener that is exposed over Funnel.
+// It will start the server if it has not been started yet.
+func (s *Server) ExposeHTTPS() (*FunnelListener, error) {
+	if err := s.Start(); err != nil {
+		return nil, err
+	}
+
+	ln, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
+		return nil, err
+	}
+
+	st := s.lb.StatusWithoutPeers()
+
+	for st.BackendState != "Running" {
+		s.logf("waiting for control connection to set up exposed socket")
+		time.Sleep(time.Second)
+		st = s.lb.StatusWithoutPeers()
+	}
+
+	if len(st.CertDomains) == 0 {
+		return nil, errors.New("tsnet: you must enable HTTPS in the admin panel to proceed")
+	}
+	domain := st.CertDomains[0]
+
+	hp := ipn.HostPort(net.JoinHostPort(domain, "443"))
+
+	srvConfig := &ipn.ServeConfig{
+		TCP: map[uint16]*ipn.TCPPortHandler{
+			443: &ipn.TCPPortHandler{
+				HTTPS: true,
+			},
+		},
+		Web: map[ipn.HostPort]*ipn.WebServerConfig{
+			hp: &ipn.WebServerConfig{
+				Handlers: map[string]*ipn.HTTPHandler {
+					"/": &ipn.HTTPHandler{Proxy: ln.Addr().String()},
+				},
+			},
+		},
+		AllowFunnel: map[ipn.HostPort]bool{
+			hp: true,
+		},
+	}
+
+	if err := s.lb.SetServeConfig(srvConfig); err != nil {
+		return nil, err
+	}
+
+
+	return &FunnelListener{ln, s, fmt.Sprintf("https://%s", domain)}, nil
+}
+
+// FunnelListener contains a net.Listener wired up to Funnel and also contains
+// metadata about that funnel session.
+type FunnelListener struct {
+	net.Listener
+	s *Server
+	url string
+}
+
+// URL returns the public-facing URL associated with this FunnelListener.
+func (flw *FunnelListener) URL() string {
+	return flw.url
+}
+
+// Close destroys the funnel listener and deregisters the funnel session from tsnet.
+//
+// This consumes the FunnelListener.
+func (flw *FunnelListener) Close() error {
+	defer flw.Listener.Close()
+
+	lc, err := flw.s.LocalClient()
+	if err != nil {
+		return err
+	}
+
+	if err := lc.SetServeConfig(context.Background(), &ipn.ServeConfig{
+		TCP:         map[uint16]*ipn.TCPPortHandler{},
+		Web:         map[ipn.HostPort]*ipn.WebServerConfig{},
+		AllowFunnel: map[ipn.HostPort]bool{},
+	}); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // Listen announces only on the Tailscale network.

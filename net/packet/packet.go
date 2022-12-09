@@ -436,6 +436,40 @@ func (q *Parsed) IsEchoResponse() bool {
 	}
 }
 
+// UpdateSrcAddr updates the source address in the packet buffer (e.g. during
+// SNAT). It also updates the checksum. Currently (2022-12-10) only TCP/UDP/ICMP
+// over IPv4 is supported. It panics if called with IPv6 addr.
+func (q *Parsed) UpdateSrcAddr(src netip.Addr) {
+	if q.IPVersion != 4 || src.Is6() {
+		panic("UpdateSrcAddr: only IPv4 is supported")
+	}
+
+	old := q.Src.Addr()
+	q.Src = netip.AddrPortFrom(src, q.Src.Port())
+
+	b := q.Buffer()
+	v4 := src.As4()
+	copy(b[12:16], v4[:])
+	updatePacketChecksums(q, old, src)
+}
+
+// UpdateDstAddr updates the source address in the packet buffer (e.g. during
+// DNAT). It also updates the checksum. Currently (2022-12-10) only TCP/UDP/ICMP
+// over IPv4 is supported. It panics if called with IPv6 addr.
+func (q *Parsed) UpdateDstAddr(dst netip.Addr) {
+	if q.IPVersion != 4 || dst.Is6() {
+		return
+	}
+
+	old := q.Dst.Addr()
+	q.Dst = netip.AddrPortFrom(dst, q.Dst.Port())
+
+	b := q.Buffer()
+	v4 := dst.As4()
+	copy(b[16:20], v4[:])
+	updatePacketChecksums(q, old, dst)
+}
+
 // EchoIDSeq extracts the identifier/sequence bytes from an ICMP Echo response,
 // and returns them as a uint32, used to lookup internally routed ICMP echo
 // responses. This function is intentionally lightweight as it is called on
@@ -497,4 +531,66 @@ func withIP(ap netip.AddrPort, ip netip.Addr) netip.AddrPort {
 
 func withPort(ap netip.AddrPort, port uint16) netip.AddrPort {
 	return netip.AddrPortFrom(ap.Addr(), port)
+}
+
+func updatePacketChecksums(p *Parsed, old, new netip.Addr) {
+	o4, n4 := old.As4(), new.As4()
+	updateV4Checksum(p.Buffer()[10:12], o4[:], n4[:]) // header
+	switch p.IPProto {
+	case ipproto.UDP:
+		updateV4Checksum(p.Transport()[6:8], o4[:], n4[:])
+	case ipproto.TCP:
+		updateV4Checksum(p.Transport()[16:18], o4[:], n4[:])
+	case ipproto.ICMPv4:
+		// Nothing to do.
+	case ipproto.SCTP:
+		// crc32c = crc32.MakeTable(crc32.Castagnoli)
+		// var b [4]byte
+		// o4, n4 := old.As4(), new.As4()
+		// o4i, n4i := binary.BigEndian.Uint32(o4[:]), binary.BigEndian.Uint32(n4[:])
+		// x := o4i ^ n4i
+		// sum := crc32.Checksum(binary.BigEndian.AppendUint32(b[:0], x), crc32c)
+
+	}
+	// TODO(maisem): more protocols
+}
+
+func updateV4Checksum(oldSum, old, new []byte) {
+	if len(old) != len(new) {
+		panic("old and new must be the same length")
+	}
+	if len(old)%2 != 0 {
+		panic("old and new must be even length")
+	}
+	/*
+		RFC 1624
+		Given the following notation:
+
+		    HC  - old checksum in header
+		    C   - one's complement sum of old header
+		    HC' - new checksum in header
+		    C'  - one's complement sum of new header
+		    m   - old value of a 16-bit field
+		    m'  - new value of a 16-bit field
+
+		    HC' = ~(C + (-m) + m')  --    [Eqn. 3]
+
+		    HC' = ~(C + ~m + m')    --    [Eqn. 3]
+		    HC' =  ~C'
+		    C'  = C + ~m + m'
+	*/
+
+	c := uint32(^binary.BigEndian.Uint16(oldSum))
+	cPrime := c
+	for len(new) > 0 {
+		mNot := uint32(^binary.BigEndian.Uint16(old[:2]))
+		mPrime := uint32(binary.BigEndian.Uint16(new[:2]))
+		cPrime += mPrime + mNot
+		new, old = new[2:], old[2:]
+	}
+	for (cPrime >> 16) > 0 {
+		cPrime = cPrime&0xFFFF + cPrime>>16
+	}
+	hcPrime := ^uint16(cPrime)
+	binary.BigEndian.PutUint16(oldSum, hcPrime)
 }

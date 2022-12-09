@@ -30,6 +30,7 @@ import (
 	"tailscale.com/types/ipproto"
 	"tailscale.com/types/key"
 	"tailscale.com/types/logger"
+	"tailscale.com/types/netmap"
 	"tailscale.com/util/clientmetric"
 	"tailscale.com/wgengine/filter"
 )
@@ -87,6 +88,10 @@ type Wrapper struct {
 	destIPActivity syncs.AtomicValue[map[netip.Addr]func()]
 	destMACAtomic  syncs.AtomicValue[[6]byte]
 	discoKey       syncs.AtomicValue[key.DiscoPublic]
+
+	selfLocal    syncs.AtomicValue[netip.Addr]
+	addressMap   syncs.AtomicValue[map[netip.Addr]netip.Addr] // dst to src
+	extAddresses syncs.AtomicValue[map[netip.Addr]struct{}]   // list of src addresses in addressMap
 
 	// vectorBuffer stores the oldest unconsumed packet vector from tdev. It is
 	// allocated in wrap() and the underlying arrays should never grow.
@@ -461,7 +466,68 @@ var (
 	magicDNSIPPortv6 = netip.AddrPortFrom(tsaddr.TailscaleServiceIPv6(), 0)
 )
 
+func (t *Wrapper) dnat(p *packet.Parsed) {
+	// Change the destination IP to the interal tailnet ip.
+	// p.Dst.Addr() ==
+	if p.IPVersion != 4 {
+		return
+	}
+
+	// TODO(maisem): handle subnets/exit nodes
+	old := p.Dst.Addr()
+	ea := t.extAddresses.Load()
+	if _, ok := ea[old]; ok {
+		p.UpdateDstAddr(t.selfLocal.Load())
+	}
+}
+
+func (t *Wrapper) SetNetMap(nm *netmap.NetworkMap) {
+	if nm != nil && nm.SelfNode != nil && len(nm.SelfNode.Addresses) > 0 {
+		t.selfLocal.Store(nm.Addresses[0].Addr())
+		addrs := nm.Masquerade
+		if len(addrs) == 0 {
+			t.extAddresses.Store(nil)
+			return
+		}
+		am := make(map[netip.Addr]netip.Addr, len(addrs))
+		mappedAddrs := make(map[netip.Addr]struct{})
+		for _, p := range nm.Peers {
+			mappedIP, ok := addrs[p.ID]
+			if !ok {
+				continue
+			}
+			am[p.Addresses[0].Addr()] = mappedIP
+			mappedAddrs[mappedIP] = struct{}{}
+		}
+		t.logf("address map: %v", am)
+		t.addressMap.Store(am)
+		t.extAddresses.Store(mappedAddrs)
+	} else {
+		t.logf("address map:  empty")
+		t.selfLocal.Store(netip.Addr{})
+		t.addressMap.Store(nil)
+		t.extAddresses.Store(nil)
+	}
+}
+
+func (t *Wrapper) snatV4(p *packet.Parsed) {
+	if p.IPVersion != 4 {
+		return
+	}
+
+	// packet is about to go to wireguard, change source IP.
+	if p.Src.Addr() == t.selfLocal.Load() {
+		// TODO(maisem): handle subnets/exit nodes
+		am := t.addressMap.Load()
+		if ext, ok := am[p.Dst.Addr()]; ok {
+			p.UpdateSrcAddr(ext)
+		}
+	}
+}
+
 func (t *Wrapper) filterOut(p *packet.Parsed) filter.Response {
+	// packet received from the os/netstack
+
 	// Fake ICMP echo responses to MagicDNS (100.100.100.100).
 	if p.IsEchoRequest() {
 		switch p.Dst {
@@ -538,8 +604,8 @@ func (t *Wrapper) IdleDuration() time.Duration {
 }
 
 func (t *Wrapper) Read(buffs [][]byte, sizes []int, offset int) (int, error) {
+	// packet from OS read and sent to WG
 	res, ok := <-t.vectorOutbound
-
 	if !ok {
 		return 0, io.EOF
 	}
@@ -563,6 +629,8 @@ func (t *Wrapper) Read(buffs [][]byte, sizes []int, offset int) (int, error) {
 	defer parsedPacketPool.Put(p)
 	for _, data := range res.data {
 		p.Decode(data[res.dataOffset:])
+
+		t.snatV4(p)
 		if m := t.destIPActivity.Load(); m != nil {
 			if fn := m[p.Dst.Addr()]; fn != nil {
 				fn()
@@ -615,6 +683,7 @@ func (t *Wrapper) injectedRead(res tunInjectedRead, buf []byte, offset int) (int
 	p := parsedPacketPool.Get().(*packet.Parsed)
 	defer parsedPacketPool.Put(p)
 	p.Decode(buf[offset : offset+n])
+	t.snatV4(p)
 
 	if m := t.destIPActivity.Load(); m != nil {
 		if fn := m[p.Dst.Addr()]; fn != nil {
@@ -630,6 +699,7 @@ func (t *Wrapper) injectedRead(res tunInjectedRead, buf []byte, offset int) (int
 }
 
 func (t *Wrapper) filterIn(p *packet.Parsed) filter.Response {
+	// packet received from wireguard.
 	if p.IPProto == ipproto.TSMP {
 		if pingReq, ok := p.AsTSMPPing(); ok {
 			t.noteActivity()
@@ -727,11 +797,12 @@ func (t *Wrapper) filterIn(p *packet.Parsed) filter.Response {
 func (t *Wrapper) Write(buffs [][]byte, offset int) (int, error) {
 	metricPacketIn.Add(int64(len(buffs)))
 	i := 0
-	if !t.disableFilter {
-		p := parsedPacketPool.Get().(*packet.Parsed)
-		defer parsedPacketPool.Put(p)
-		for _, buff := range buffs {
-			p.Decode(buff[offset:])
+	p := parsedPacketPool.Get().(*packet.Parsed)
+	defer parsedPacketPool.Put(p)
+	for _, buff := range buffs {
+		p.Decode(buff[offset:])
+		t.dnat(p)
+		if !t.disableFilter {
 			if t.filterIn(p) != filter.Accept {
 				metricPacketInDrop.Add(1)
 			} else {
@@ -739,7 +810,8 @@ func (t *Wrapper) Write(buffs [][]byte, offset int) (int, error) {
 				i++
 			}
 		}
-	} else {
+	}
+	if t.disableFilter {
 		i = len(buffs)
 	}
 	buffs = buffs[:i]

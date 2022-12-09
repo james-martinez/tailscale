@@ -82,6 +82,10 @@ type NetworkMap struct {
 	DomainAuditLogID string
 
 	UserProfiles map[tailcfg.UserID]tailcfg.UserProfile
+
+	// Masquerade is the set of external addresses that are assigned to
+	// this node to communicate with other nodes in the network.
+	Masquerade map[tailcfg.NodeID]netip.Addr
 }
 
 // AnyPeersAdvertiseRoutes reports whether any peer is advertising non-exit node routes.

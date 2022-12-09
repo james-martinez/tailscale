@@ -11,7 +11,9 @@ import (
 	"sort"
 
 	"tailscale.com/envknob"
+	"tailscale.com/net/tsaddr"
 	"tailscale.com/tailcfg"
+	"tailscale.com/types/ipproto"
 	"tailscale.com/types/key"
 	"tailscale.com/types/logger"
 	"tailscale.com/types/netmap"
@@ -162,6 +164,10 @@ func (ms *mapSession) netmapForResponse(resp *tailcfg.MapResponse) *netmap.Netwo
 		Debug:            debug,
 		ControlHealth:    ms.lastHealth,
 		TKAEnabled:       ms.lastTKAInfo != nil && !ms.lastTKAInfo.Disabled,
+		Masquerade: map[tailcfg.NodeID]netip.Addr{
+			123: netip.MustParseAddr("100.64.0.1"), // device1
+			456: netip.MustParseAddr("100.64.1.1"), // device2
+		},
 	}
 	ms.netMapBuilding = nm
 
@@ -196,7 +202,30 @@ func (ms *mapSession) netmapForResponse(resp *tailcfg.MapResponse) *netmap.Netwo
 	if nm.SelfNode != nil {
 		nm.SelfNode.InitDisplayNames(magicDNSSuffix)
 	}
+	assignedAddresses := map[tailcfg.NodeID]netip.Addr{
+		123: netip.MustParseAddr("100.64.1.1"), // device1
+		456: netip.MustParseAddr("100.64.0.1"), // device2
+	}
 	for _, peer := range resp.Peers {
+		// XXXXXXXXXXXX remove
+		ea, ok := assignedAddresses[peer.ID]
+		if ok {
+			peer.Addresses[0] = netip.PrefixFrom(ea, 32)
+			peer.AllowedIPs[0] = peer.Addresses[0]
+			nm.PacketFilter = append(nm.PacketFilter, filter.Match{
+				IPProto: []ipproto.Proto{
+					ipproto.TCP,
+					ipproto.UDP,
+					ipproto.ICMPv4,
+					ipproto.ICMPv6,
+				},
+				Srcs: []netip.Prefix{peer.Addresses[0]},
+				Dsts: []filter.NetPortRange{
+					{Net: tsaddr.AllIPv4(), Ports: filter.PortRange{0, 65535}},
+				},
+			})
+		}
+
 		peer.InitDisplayNames(magicDNSSuffix)
 		if !peer.Sharer.IsZero() {
 			if ms.keepSharerAndUserSplit {

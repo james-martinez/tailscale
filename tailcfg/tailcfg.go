@@ -1431,6 +1431,8 @@ type MapResponse struct {
 	// download and whether the client is using it. A nil value means no change
 	// or nothing to report.
 	ClientVersion *ClientVersion `json:",omitempty"`
+
+	Masquerade map[NodeID]netip.Addr // NodeID of peer which should see this address
 }
 
 // ClientVersion is information about the latest client version that's available

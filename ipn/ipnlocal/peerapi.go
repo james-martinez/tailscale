@@ -45,6 +45,7 @@ import (
 	"tailscale.com/net/interfaces"
 	"tailscale.com/net/netaddr"
 	"tailscale.com/net/netutil"
+	"tailscale.com/net/sockstats"
 	"tailscale.com/tailcfg"
 	"tailscale.com/util/clientmetric"
 	"tailscale.com/util/multierr"
@@ -709,6 +710,8 @@ func (h *peerAPIHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	case "/v0/doctor":
 		h.handleServeDoctor(w, r)
+	case "/v0/sockstats":
+		h.handleServeSockStats(w, r)
 		return
 	case "/v0/ingress":
 		metricIngressCalls.Add(1)
@@ -837,6 +840,48 @@ func (h *peerAPIHandler) handleServeDoctor(w http.ResponseWriter, r *http.Reques
 	})
 
 	fmt.Fprintln(w, "</pre>")
+}
+
+func (h *peerAPIHandler) handleServeSockStats(w http.ResponseWriter, r *http.Request) {
+	if !h.canDebug() {
+		http.Error(w, "denied; no debug access", http.StatusForbidden)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprintln(w, "<!DOCTYPE html><h1>Socket Stats</h1>")
+
+	stats := sockstats.Get()
+	if stats == nil {
+		fmt.Fprintln(w, "No socket stats available")
+		return
+	}
+
+	fmt.Fprintln(w, "<table border='1' cellspacing='0' style='border-collapse: collapse;'>")
+	fmt.Fprintln(w, "<thead>")
+	fmt.Fprintln(w, "<th>Label</th>")
+	fmt.Fprintln(w, "<th>Tx</th>")
+	fmt.Fprintln(w, "<th>Rx</th>")
+	for _, iface := range stats.Interfaces {
+		fmt.Fprintf(w, "<th>Tx (%s)</th>", html.EscapeString(iface))
+		fmt.Fprintf(w, "<th>Rx (%s)</th>", html.EscapeString(iface))
+	}
+	fmt.Fprintln(w, "</thead>")
+
+	fmt.Fprintln(w, "<tbody>")
+	for label, stat := range stats.Stats {
+		fmt.Fprintln(w, "<tr>")
+		fmt.Fprintf(w, "<td>%s</td>", html.EscapeString(label))
+		fmt.Fprintf(w, "<td align=right>%d</td>", stat.TxBytes)
+		fmt.Fprintf(w, "<td align=right>%d</td>", stat.RxBytes)
+		for _, iface := range stats.Interfaces {
+			fmt.Fprintf(w, "<td align=right>%d</td>", stat.TxByBytesByInterface[iface])
+			fmt.Fprintf(w, "<td align=right>%d</td>", stat.RxByBytesByInterface[iface])
+		}
+		fmt.Fprintln(w, "</tr>")
+	}
+	fmt.Fprintln(w, "</tbody>")
+
+	fmt.Fprintln(w, "</table>")
 }
 
 type incomingFile struct {

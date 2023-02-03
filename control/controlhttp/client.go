@@ -41,6 +41,7 @@ import (
 	"tailscale.com/net/dnscache"
 	"tailscale.com/net/dnsfallback"
 	"tailscale.com/net/netutil"
+	"tailscale.com/net/sockstats"
 	"tailscale.com/net/tlsdial"
 	"tailscale.com/net/tshttpproxy"
 	"tailscale.com/tailcfg"
@@ -266,6 +267,7 @@ var debugNoiseDial = envknob.RegisterBool("TS_DEBUG_NOISE_DIAL")
 // connection into a controlbase.Conn. If addr is valid, then no DNS is used
 // and the connection will be made to the provided address.
 func (a *Dialer) dialHost(ctx context.Context, addr netip.Addr) (*ClientConn, error) {
+	ctx = sockstats.WithSockStats(ctx, "controlclient")
 	// Create one shared context used by both port 80 and port 443 dials.
 	// If port 80 is still in flight when 443 returns, this deferred cancel
 	// will stop the port 80 dial.

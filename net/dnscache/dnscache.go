@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"tailscale.com/envknob"
+	"tailscale.com/net/sockstats"
 	"tailscale.com/types/logger"
 	"tailscale.com/util/cloudenv"
 	"tailscale.com/util/singleflight"
@@ -548,6 +549,8 @@ const fallbackDelay = 300 * time.Millisecond
 func (dc *dialCall) raceDial(ctx context.Context, ips []netip.Addr) (net.Conn, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	ctx = sockstats.WithSockStats(ctx, "dnscache")
 
 	type res struct {
 		c   net.Conn

@@ -463,6 +463,10 @@ func (b *LocalBackend) serveWebHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "unknown proxy destination", http.StatusInternalServerError)
 			return
 		}
+		if r.URL.Path != "/" {
+			// Trim the mount point from the URL path before proxying. (#6571)
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, mountPoint)
+		}
 		p.(http.Handler).ServeHTTP(w, r)
 		return
 	}

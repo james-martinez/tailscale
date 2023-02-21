@@ -201,6 +201,11 @@ var debugCmd = &ffcli.Command{
 				return fs
 			})(),
 		},
+		{
+			Name:      "peer-status",
+			Exec:      runPeerStatus,
+			ShortHelp: "prints debug information about a peer",
+		},
 	},
 }
 
@@ -788,4 +793,42 @@ func runCapture(ctx context.Context, args []string) error {
 	fmt.Fprintln(os.Stderr, "Press Ctrl-C to stop the capture.")
 	_, err = io.Copy(f, stream)
 	return err
+}
+
+func runPeerStatus(ctx context.Context, args []string) error {
+	st, err := localClient.Status(ctx)
+	if err != nil {
+		return fixTailscaledConnectError(err)
+	}
+	description, ok := isRunningOrStarting(st)
+	if !ok {
+		printf("%s\n", description)
+		os.Exit(1)
+	}
+
+	if len(args) != 1 || args[0] == "" {
+		return errors.New("usage: peer-status <hostname-or-IP>")
+	}
+	var ip string
+
+	hostOrIP := args[0]
+	ip, self, err := tailscaleIPFromArg(ctx, hostOrIP)
+	if err != nil {
+		return err
+	}
+	if self {
+		printf("%v is local Tailscale IP\n", ip)
+		return nil
+	}
+
+	if ip != hostOrIP {
+		log.Printf("lookup %q => %q", hostOrIP, ip)
+	}
+
+	chs, err := localClient.PeerStatus(ctx, netip.MustParseAddr(ip))
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%s\n", must.Get(json.MarshalIndent(chs, "", " ")))
+	return nil
 }

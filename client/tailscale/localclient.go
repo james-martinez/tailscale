@@ -430,6 +430,19 @@ func (lc *LocalClient) status(ctx context.Context, queryString string) (*ipnstat
 	return decodeJSON[*ipnstate.Status](body)
 }
 
+// PeerStatus returns debug information about the provided peer.
+//
+// TODO(andrew): better return type
+func (lc *LocalClient) PeerStatus(ctx context.Context, ip netip.Addr) ([]any, error) {
+	v := url.Values{}
+	v.Set("ip", ip.String())
+	body, err := lc.send(ctx, "POST", "/localapi/v0/peer-status?"+v.Encode(), 200, nil)
+	if err != nil {
+		return nil, fmt.Errorf("error %w: %s", err, body)
+	}
+	return decodeJSON[[]any](body)
+}
+
 // IDToken is a request to get an OIDC ID token for an audience.
 // The token can be presented to any resource provider which offers OIDC
 // Federation.
